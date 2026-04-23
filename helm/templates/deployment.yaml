@@ -30,6 +30,17 @@ spec:
         - name: tracker
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /usr/local/bin/k8s-active-image-tracker
+          {{- if .Values.tracker.registry }}
+          env:
+            - name: DOCKER_CONFIG
+              value: /docker-config
+          volumeMounts:
+            - name: docker-config
+              mountPath: /docker-config
+              readOnly: true
+          {{- end }}
           {{- if .Values.healthProbe.enabled }}
           ports:
             - name: health
@@ -52,8 +63,8 @@ spec:
             {{- if .Values.tracker.namespaces }}
             - --namespaces={{ join "," .Values.tracker.namespaces }}
             {{- end }}
-            {{- if .Values.tracker.registries }}
-            - --registries={{ join "," .Values.tracker.registries }}
+            {{- if .Values.tracker.registry }}
+            - --registry={{ .Values.tracker.registry }}
             {{- end }}
             - --tag-prefix={{ .Values.tracker.tagPrefix }}
             - --workers={{ .Values.tracker.workers }}
@@ -71,6 +82,12 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      {{- if .Values.tracker.registry }}
+      volumes:
+        - name: docker-config
+          configMap:
+            name: {{ include "k8s-active-image-tracker.fullname" . }}-docker-config
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

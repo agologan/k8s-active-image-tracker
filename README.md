@@ -27,6 +27,7 @@ Use cases:
 - returns non-zero / reconcile error when registry syncs fail
 - uses [`go-containerregistry/pkg/crane`](https://github.com/google/go-containerregistry/tree/main/pkg/crane) for registry operations
 - uses Docker/keychain auth supported by `go-containerregistry`
+- container image bundles `docker-credential-ecr-login` for ECR auth
 
 ## Build
 
@@ -38,6 +39,8 @@ Container image:
 
 ```bash
 docker build -t ghcr.io/your-org/k8s-active-image-tracker:latest .
+
+Runtime image uses Alpine and includes `docker-credential-ecr-login` for ECR auth.
 ```
 
 ## Run
@@ -76,16 +79,19 @@ helm install active-image-tracker ./helm \
   --set image.repository=ghcr.io/your-org/k8s-active-image-tracker \
   --set image.tag=latest \
   --set tracker.tagPrefix=active \
-  --set tracker.registries[0]=ghcr.io \
+  --set tracker.registry=123456789012.dkr.ecr.us-east-1.amazonaws.com \
   --set tracker.namespaces[0]=payments \
   --set tracker.namespaces[1]=checkout
 ```
+
+For ECR in cluster, annotate service account for IRSA or otherwise provide AWS credentials. Chart writes Docker config for `tracker.registry` and points `go-containerregistry` at `docker-credential-ecr-login`.
 
 Chart includes only resources needed to run in cluster:
 - `Deployment`
 - `ServiceAccount`
 - `ClusterRole`
 - `ClusterRoleBinding`
+- `ConfigMap` for Docker credential helper config when `tracker.registry` set
 
 Health probes:
 - liveness: `GET /healthz`

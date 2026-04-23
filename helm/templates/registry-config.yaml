@@ -1,0 +1,15 @@
+{{- if .Values.tracker.registry }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "k8s-active-image-tracker.fullname" . }}-docker-config
+  labels:
+    {{- include "k8s-active-image-tracker.labels" . | nindent 4 }}
+data:
+  config.json: |
+    {
+      "credHelpers": {
+        "{{ .Values.tracker.registry }}": "ecr-login"
+      }
+    }
+{{- end }}

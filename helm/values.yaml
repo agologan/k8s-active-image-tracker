@@ -29,7 +29,7 @@ affinity: {}
 
 tracker:
   namespaces: []
-  registries: []
+  registry: ""
   tagPrefix: active
   workers: 4
   verbose: false
