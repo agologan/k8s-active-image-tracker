@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -93,6 +94,7 @@ func main() {
 	}
 
 	logger := newLogger(cfg.Verbose)
+	ctrl.SetLogger(logr.FromSlogHandler(logger.Handler()))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
