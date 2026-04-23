@@ -86,6 +86,22 @@ helm install active-image-tracker ./helm \
 
 For ECR in cluster, annotate service account for IRSA or otherwise provide AWS credentials. Chart writes Docker config for `tracker.registry` and points `go-containerregistry` at `docker-credential-ecr-login`.
 
+Required ECR IAM permissions depend on whether tracker only reads or also writes tag updates.
+
+Minimum auth permission:
+- `ecr:GetAuthorizationToken`
+
+Read existing source/destination image state:
+- `ecr:BatchGetImage`
+- `ecr:GetDownloadUrlForLayer`
+- `ecr:BatchCheckLayerAvailability`
+
+Write copied image/tag state:
+- `ecr:PutImage`
+- `ecr:InitiateLayerUpload`
+- `ecr:UploadLayerPart`
+- `ecr:CompleteLayerUpload`
+
 Chart includes only resources needed to run in cluster:
 - `Deployment`
 - `ServiceAccount`
