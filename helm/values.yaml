@@ -32,6 +32,7 @@ tracker:
   registry: ""
   tagPrefix: active
   workers: 4
+  trackJobs: false
   verbose: false
   dryRun: false
   extraArgs: []

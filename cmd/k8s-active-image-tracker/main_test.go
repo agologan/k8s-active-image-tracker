@@ -97,6 +97,16 @@ func TestParseConfigArgs_UsesDedicatedFlagSet(t *testing.T) {
 	}
 }
 
+func TestParseConfigArgs_TrackJobOwnedPods(t *testing.T) {
+	cfg, err := parseConfigArgs([]string{"--track-job-owned-pods"})
+	if err != nil {
+		t.Fatalf("parseConfigArgs() error = %v", err)
+	}
+	if !cfg.TrackJobOwnedPods {
+		t.Fatal("cfg.TrackJobOwnedPods = false, want true")
+	}
+}
+
 func TestDefaultKubeconfig_UsesKUBECONFIGEnv(t *testing.T) {
 	t.Setenv("KUBECONFIG", "/tmp/first:/tmp/second")
 
@@ -346,6 +356,37 @@ func TestBuildAssignments_SkipsDeletingPods(t *testing.T) {
 	}
 }
 
+func TestBuildAssignments_SkipsJobOwnedPodsByDefault(t *testing.T) {
+	a := newTestApp(nil, nil, "live")
+	pod := newTestPod("payments", "job-pod", "ghcr.io/acme/api:1.0")
+	pod.OwnerReferences = []metav1.OwnerReference{{Kind: "Job", Name: "batch-run"}}
+
+	assignments, conflicts := a.buildAssignments([]v1.Pod{pod})
+
+	if len(conflicts) != 0 {
+		t.Fatalf("buildAssignments() conflicts = %v, want none", conflicts)
+	}
+	if len(assignments) != 0 {
+		t.Fatalf("buildAssignments() assignments = %v, want none", assignments)
+	}
+}
+
+func TestBuildAssignments_KeepsJobOwnedPodsWhenTrackingEnabled(t *testing.T) {
+	a := newTestApp(nil, nil, "live")
+	a.cfg.TrackJobOwnedPods = true
+	pod := newTestPod("payments", "job-pod", "ghcr.io/acme/api:1.0")
+	pod.OwnerReferences = []metav1.OwnerReference{{Kind: "Job", Name: "batch-run"}}
+
+	assignments, conflicts := a.buildAssignments([]v1.Pod{pod})
+
+	if len(conflicts) != 0 {
+		t.Fatalf("buildAssignments() conflicts = %v, want none", conflicts)
+	}
+	if len(assignments) != 1 {
+		t.Fatalf("buildAssignments() assignments len = %d, want 1", len(assignments))
+	}
+}
+
 func TestPodTrackingState_ChangeDetected(t *testing.T) {
 	left := newTestPod("ns", "pod", "ghcr.io/acme/api:1.0")
 	right := newTestPod("ns", "pod", "ghcr.io/acme/api:2.0")
@@ -391,6 +432,16 @@ func TestPodTrackingState_DeletionChangeDetected(t *testing.T) {
 
 	if podTrackingState(&left) == podTrackingState(&right) {
 		t.Fatal("podTrackingState() should differ when deletion state differs")
+	}
+}
+
+func TestPodTrackingState_JobOwnerChangeDetected(t *testing.T) {
+	left := newTestPod("ns", "pod", "ghcr.io/acme/api:1.0")
+	right := newTestPod("ns", "pod", "ghcr.io/acme/api:1.0")
+	right.OwnerReferences = []metav1.OwnerReference{{Kind: "Job", Name: "batch-run"}}
+
+	if podTrackingState(&left) == podTrackingState(&right) {
+		t.Fatal("podTrackingState() should differ when job ownership differs")
 	}
 }
 

@@ -50,6 +50,7 @@ type config struct {
 	TagPrefix              string
 	Workers                int
 	HealthProbeBindAddress string
+	TrackJobs              bool
 	DryRun                 bool
 	Once                   bool
 	Verbose                bool
@@ -151,6 +152,7 @@ func parseConfigArgs(args []string) (config, error) {
 	fs.StringVar(&cfg.TagPrefix, "tag-prefix", "active", "Destination tag prefix. Final tag becomes <prefix>-<namespace>.")
 	fs.IntVar(&cfg.Workers, "workers", 4, "Concurrent registry tag workers.")
 	fs.StringVar(&cfg.HealthProbeBindAddress, "health-probe-bind-address", ":8081", "Health probe bind address. Set 0 to disable.")
+	fs.BoolVar(&cfg.TrackJobs, "track-jobs", false, "Track pods with direct ownerReference kind Job. Default skips them.")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "Log planned tag updates without writing to registry.")
 	fs.BoolVar(&cfg.Once, "once", false, "Run single sync then exit.")
 	fs.BoolVar(&cfg.Verbose, "verbose", false, "Enable debug logs.")
@@ -232,6 +234,7 @@ func (a *app) run(ctx context.Context, restCfg *rest.Config, scheme *runtime.Sch
 		"tagPrefix", a.cfg.TagPrefix,
 		"workers", a.cfg.Workers,
 		"healthProbeBindAddress", a.cfg.HealthProbeBindAddress,
+		"trackJobs", a.cfg.TrackJobs,
 		"dryRun", a.cfg.DryRun,
 	)
 
@@ -409,7 +412,7 @@ func (a *app) buildAssignments(pods []v1.Pod) ([]assignment, []string) {
 	conflicts := make(map[string]map[string]struct{})
 
 	for _, pod := range pods {
-		if !a.namespaceAllowed(pod.Namespace) || !podActiveForTracking(&pod) {
+		if !a.namespaceAllowed(pod.Namespace) || !podActiveForTracking(&pod, a.cfg.TrackJobs) {
 			continue
 		}
 
@@ -625,12 +628,16 @@ func podTrackingState(pod *v1.Pod) string {
 		pod.Namespace,
 		string(pod.Status.Phase),
 		strconv.FormatBool(pod.DeletionTimestamp != nil),
+		strconv.FormatBool(podOwnedByJob(pod)),
 		strings.Join(images, ","),
 	}, "|")
 }
 
-func podActiveForTracking(pod *v1.Pod) bool {
+func podActiveForTracking(pod *v1.Pod, trackJobs bool) bool {
 	if pod == nil || pod.DeletionTimestamp != nil {
+		return false
+	}
+	if !trackJobs && podOwnedByJob(pod) {
 		return false
 	}
 
@@ -640,6 +647,19 @@ func podActiveForTracking(pod *v1.Pod) bool {
 	default:
 		return true
 	}
+}
+
+func podOwnedByJob(pod *v1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+
+	for _, owner := range pod.OwnerReferences {
+		if owner.Kind == "Job" {
+			return true
+		}
+	}
+	return false
 }
 
 func collectErrors(errCh <-chan error) []error {
