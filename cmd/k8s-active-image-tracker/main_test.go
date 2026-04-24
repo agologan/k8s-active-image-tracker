@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -11,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
+	remotetransport "github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -468,6 +474,169 @@ func TestPodTrackingState_JobOwnerChangeDetected(t *testing.T) {
 	}
 }
 
+func TestRegistryCachingKeychain_CachesByRegistry(t *testing.T) {
+	inner := &countingKeychain{}
+	cached := newRegistryCachingKeychain(inner, time.Minute)
+
+	firstRepo, err := name.NewRepository("123456789012.dkr.ecr.eu-west-1.amazonaws.com/acme/api")
+	if err != nil {
+		t.Fatalf("name.NewRepository(firstRepo) error = %v", err)
+	}
+	secondRepoSameRegistry, err := name.NewRepository("123456789012.dkr.ecr.eu-west-1.amazonaws.com/acme/worker")
+	if err != nil {
+		t.Fatalf("name.NewRepository(secondRepoSameRegistry) error = %v", err)
+	}
+	thirdRepoOtherRegistry, err := name.NewRepository("ghcr.io/acme/api")
+	if err != nil {
+		t.Fatalf("name.NewRepository(thirdRepoOtherRegistry) error = %v", err)
+	}
+
+	firstAuth, err := authn.Resolve(context.Background(), cached, firstRepo)
+	if err != nil {
+		t.Fatalf("Resolve(firstRepo) error = %v", err)
+	}
+	secondAuth, err := authn.Resolve(context.Background(), cached, secondRepoSameRegistry)
+	if err != nil {
+		t.Fatalf("Resolve(secondRepoSameRegistry) error = %v", err)
+	}
+	thirdAuth, err := authn.Resolve(context.Background(), cached, thirdRepoOtherRegistry)
+	if err != nil {
+		t.Fatalf("Resolve(thirdRepoOtherRegistry) error = %v", err)
+	}
+
+	if inner.calls != 2 {
+		t.Fatalf("inner Resolve calls = %d, want 2", inner.calls)
+	}
+
+	firstCfg, err := authn.Authorization(context.Background(), firstAuth)
+	if err != nil {
+		t.Fatalf("Authorization(firstAuth) error = %v", err)
+	}
+	secondCfg, err := authn.Authorization(context.Background(), secondAuth)
+	if err != nil {
+		t.Fatalf("Authorization(secondAuth) error = %v", err)
+	}
+	thirdCfg, err := authn.Authorization(context.Background(), thirdAuth)
+	if err != nil {
+		t.Fatalf("Authorization(thirdAuth) error = %v", err)
+	}
+
+	if firstCfg.Password != secondCfg.Password {
+		t.Fatalf("same registry passwords differ: %q vs %q", firstCfg.Password, secondCfg.Password)
+	}
+	if thirdCfg.Password == firstCfg.Password {
+		t.Fatalf("different registry password = %q, want different from %q", thirdCfg.Password, firstCfg.Password)
+	}
+}
+
+func TestRegistryCachingKeychain_Invalidate(t *testing.T) {
+	inner := &countingKeychain{}
+	cached := newRegistryCachingKeychain(inner, time.Minute)
+	repo, err := name.NewRepository("123456789012.dkr.ecr.eu-west-1.amazonaws.com/acme/api")
+	if err != nil {
+		t.Fatalf("name.NewRepository(repo) error = %v", err)
+	}
+
+	firstAuth, err := authn.Resolve(context.Background(), cached, repo)
+	if err != nil {
+		t.Fatalf("Resolve(first) error = %v", err)
+	}
+	firstCfg, err := authn.Authorization(context.Background(), firstAuth)
+	if err != nil {
+		t.Fatalf("Authorization(first) error = %v", err)
+	}
+
+	cached.Invalidate(repo.RegistryStr())
+
+	secondAuth, err := authn.Resolve(context.Background(), cached, repo)
+	if err != nil {
+		t.Fatalf("Resolve(second) error = %v", err)
+	}
+	secondCfg, err := authn.Authorization(context.Background(), secondAuth)
+	if err != nil {
+		t.Fatalf("Authorization(second) error = %v", err)
+	}
+
+	if inner.calls != 2 {
+		t.Fatalf("inner Resolve calls = %d, want 2", inner.calls)
+	}
+	if firstCfg.Password == secondCfg.Password {
+		t.Fatalf("password after invalidation = %q, want different from %q", secondCfg.Password, firstCfg.Password)
+	}
+}
+
+func TestIsUnauthorizedError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "plain error", err: assertErr("boom"), want: false},
+		{name: "status 401", err: &remotetransport.Error{StatusCode: http.StatusUnauthorized}, want: true},
+		{name: "wrapped status 401", err: fmt.Errorf("wrapped: %w", &remotetransport.Error{StatusCode: http.StatusUnauthorized}), want: true},
+		{name: "unauthorized diagnostic", err: &remotetransport.Error{Errors: []remotetransport.Diagnostic{{Code: remotetransport.UnauthorizedErrorCode}}}, want: true},
+		{name: "denied diagnostic", err: &remotetransport.Error{Errors: []remotetransport.Diagnostic{{Code: remotetransport.DeniedErrorCode}}}, want: true},
+		{name: "other status", err: &remotetransport.Error{StatusCode: http.StatusInternalServerError}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isUnauthorizedError(tt.err); got != tt.want {
+				t.Fatalf("isUnauthorizedError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAppWithAuthRetry_InvalidatesAndRetries(t *testing.T) {
+	inner := &countingKeychain{}
+	cached := newRegistryCachingKeychain(inner, time.Minute)
+	repo, err := name.NewRepository("123456789012.dkr.ecr.eu-west-1.amazonaws.com/acme/api")
+	if err != nil {
+		t.Fatalf("name.NewRepository(repo) error = %v", err)
+	}
+
+	a := &app{
+		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		authKeychain: cached,
+	}
+
+	attempts := 0
+	passwords := make([]string, 0, 2)
+	err = a.withAuthRetry(context.Background(), repo.RegistryStr(), func() error {
+		attempts++
+		auth, resolveErr := authn.Resolve(context.Background(), cached, repo)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		cfg, resolveErr := authn.Authorization(context.Background(), auth)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		passwords = append(passwords, cfg.Password)
+		if attempts == 1 {
+			return &remotetransport.Error{StatusCode: http.StatusUnauthorized}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withAuthRetry() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("inner Resolve calls = %d, want 2", inner.calls)
+	}
+	if len(passwords) != 2 {
+		t.Fatalf("password count = %d, want 2", len(passwords))
+	}
+	if passwords[0] == passwords[1] {
+		t.Fatalf("retry password = %q, want different from %q", passwords[1], passwords[0])
+	}
+}
+
 func newTestApp(namespaces, registries []string, tagPrefix string) *app {
 	return &app{
 		cfg: config{
@@ -478,6 +647,22 @@ func newTestApp(namespaces, registries []string, tagPrefix string) *app {
 		namespaceAllow: toSet(namespaces),
 		registryAllow:  normalizeRegistries(registries),
 	}
+}
+
+type countingKeychain struct {
+	calls int
+}
+
+func (k *countingKeychain) Resolve(target authn.Resource) (authn.Authenticator, error) {
+	return k.ResolveContext(context.Background(), target)
+}
+
+func (k *countingKeychain) ResolveContext(_ context.Context, target authn.Resource) (authn.Authenticator, error) {
+	k.calls++
+	return authn.FromConfig(authn.AuthConfig{
+		Username: "user",
+		Password: fmt.Sprintf("token-%d-%s", k.calls, target.RegistryStr()),
+	}), nil
 }
 
 type assertErr string

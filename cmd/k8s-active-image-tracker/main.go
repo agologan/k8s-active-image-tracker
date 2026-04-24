@@ -22,6 +22,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
+	remotetransport "github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -79,6 +80,7 @@ type app struct {
 	client         ctrlclient.Client
 	namespaceAllow map[string]struct{}
 	registryAllow  map[string]struct{}
+	authKeychain   *registryCachingKeychain
 	craneOptions   []crane.Option
 	ready          atomic.Bool
 }
@@ -117,14 +119,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	authKeychain := newRegistryCachingKeychain(authn.DefaultKeychain, 10*time.Hour)
 	application := &app{
 		cfg:            cfg,
 		logger:         logger,
 		client:         apiClient,
 		namespaceAllow: toSet(cfg.Namespaces),
 		registryAllow:  normalizeRegistries(cfg.Registries),
+		authKeychain:   authKeychain,
 		craneOptions: []crane.Option{
-			crane.WithAuthFromKeychain(authn.DefaultKeychain),
+			crane.WithAuthFromKeychain(authKeychain),
 		},
 	}
 
@@ -550,7 +554,12 @@ func (a *app) syncAssignment(ctx context.Context, item assignment, stats *syncSt
 	default:
 	}
 
-	sourceDigest, err := crane.Digest(item.Source, craneOpts...)
+	var sourceDigest string
+	err := a.withAuthRetry(ctx, item.Registry, func() error {
+		var resolveErr error
+		sourceDigest, resolveErr = crane.Digest(item.Source, craneOpts...)
+		return resolveErr
+	})
 	if err != nil {
 		if isMissingManifestError(err) {
 			a.logger.Warn("source image missing in registry; skipped",
@@ -566,14 +575,21 @@ func (a *app) syncAssignment(ctx context.Context, item assignment, stats *syncSt
 		return fmt.Errorf("resolve source digest: %w", err)
 	}
 
-	destinationDigest, err := crane.Digest(item.Destination, craneOpts...)
+	var destinationDigest string
+	err = a.withAuthRetry(ctx, item.Registry, func() error {
+		var resolveErr error
+		destinationDigest, resolveErr = crane.Digest(item.Destination, craneOpts...)
+		return resolveErr
+	})
 	if err == nil && destinationDigest == sourceDigest {
 		a.logger.Debug("destination already current", "destination", item.Destination, "digest", sourceDigest)
 		atomic.AddInt64(&stats.Skipped, 1)
 		return nil
 	}
 
-	if err := crane.Copy(item.Source, item.Destination, craneOpts...); err != nil {
+	if err := a.withAuthRetry(ctx, item.Registry, func() error {
+		return crane.Copy(item.Source, item.Destination, craneOpts...)
+	}); err != nil {
 		if isMissingManifestError(err) {
 			a.logger.Warn("source image missing during copy; skipped",
 				"namespace", item.Namespace,
@@ -607,6 +623,43 @@ func isMissingManifestError(err error) bool {
 	return strings.Contains(message, "manifest_unknown") ||
 		strings.Contains(message, "manifest unknown") ||
 		strings.Contains(message, "requested image not found")
+}
+
+func isUnauthorizedError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var transportErr *remotetransport.Error
+	if !errors.As(err, &transportErr) {
+		return false
+	}
+	if transportErr.StatusCode == http.StatusUnauthorized {
+		return true
+	}
+	for _, diagnostic := range transportErr.Errors {
+		if diagnostic.Code == remotetransport.UnauthorizedErrorCode || diagnostic.Code == remotetransport.DeniedErrorCode {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *app) withAuthRetry(ctx context.Context, registry string, operation func() error) error {
+	err := operation()
+	if err == nil || !isUnauthorizedError(err) || a.authKeychain == nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	a.logger.Warn("registry auth failed; invalidating cached credentials and retrying",
+		"registry", registry,
+		"error", err,
+	)
+	a.authKeychain.Invalidate(registry)
+	return operation()
 }
 
 func (a *app) namespaceAllowed(namespace string) bool {
@@ -749,6 +802,68 @@ func normalizeRegistries(values []string) map[string]struct{} {
 		}
 	}
 	return set
+}
+
+type registryCachingKeychain struct {
+	inner authn.Keychain
+	mu    sync.RWMutex
+	byKey map[string]authn.Authenticator
+}
+
+func newRegistryCachingKeychain(inner authn.Keychain, refreshInterval time.Duration) *registryCachingKeychain {
+	return &registryCachingKeychain{
+		inner: authn.RefreshingKeychain(inner, refreshInterval),
+		byKey: make(map[string]authn.Authenticator),
+	}
+}
+
+func (k *registryCachingKeychain) Resolve(target authn.Resource) (authn.Authenticator, error) {
+	return k.ResolveContext(context.Background(), target)
+}
+
+func (k *registryCachingKeychain) ResolveContext(ctx context.Context, target authn.Resource) (authn.Authenticator, error) {
+	cacheKey := target.RegistryStr()
+	if cacheKey == "" {
+		cacheKey = target.String()
+	}
+
+	k.mu.RLock()
+	cached, ok := k.byKey[cacheKey]
+	k.mu.RUnlock()
+	if ok {
+		return cached, nil
+	}
+
+	auth, err := authn.Resolve(ctx, k.inner, target)
+	if err != nil {
+		return nil, err
+	}
+
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if cached, ok := k.byKey[cacheKey]; ok {
+		return cached, nil
+	}
+	k.byKey[cacheKey] = auth
+	return auth, nil
+}
+
+func (k *registryCachingKeychain) Invalidate(registry string) {
+	registry = strings.TrimSpace(registry)
+	if registry == "" {
+		return
+	}
+
+	keys := []string{registry}
+	if normalized, err := name.NewRegistry(registry, name.WeakValidation); err == nil && normalized.Name() != registry {
+		keys = append(keys, normalized.Name())
+	}
+
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, key := range keys {
+		delete(k.byKey, key)
+	}
 }
 
 func displayOrAll(values []string) string {
