@@ -97,13 +97,36 @@ func TestParseConfigArgs_UsesDedicatedFlagSet(t *testing.T) {
 	}
 }
 
-func TestParseConfigArgs_TrackJobOwnedPods(t *testing.T) {
-	cfg, err := parseConfigArgs([]string{"--track-job-owned-pods"})
+func TestParseConfigArgs_TrackJobs(t *testing.T) {
+	cfg, err := parseConfigArgs([]string{"--track-jobs"})
 	if err != nil {
 		t.Fatalf("parseConfigArgs() error = %v", err)
 	}
-	if !cfg.TrackJobOwnedPods {
-		t.Fatal("cfg.TrackJobOwnedPods = false, want true")
+	if !cfg.TrackJobs {
+		t.Fatal("cfg.TrackJobs = false, want true")
+	}
+}
+
+func TestIsMissingManifestError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "manifest unknown uppercase", err: io.EOF},
+		{name: "manifest unknown token", err: assertErr("MANIFEST_UNKNOWN: Requested image not found"), want: true},
+		{name: "manifest unknown lowercase", err: assertErr("manifest unknown"), want: true},
+		{name: "requested image not found", err: assertErr("Requested image not found"), want: true},
+		{name: "other registry error", err: assertErr("UNAUTHORIZED: authentication required"), want: false},
+		{name: "nil", err: nil, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isMissingManifestError(tt.err); got != tt.want {
+				t.Fatalf("isMissingManifestError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -373,7 +396,7 @@ func TestBuildAssignments_SkipsJobOwnedPodsByDefault(t *testing.T) {
 
 func TestBuildAssignments_KeepsJobOwnedPodsWhenTrackingEnabled(t *testing.T) {
 	a := newTestApp(nil, nil, "live")
-	a.cfg.TrackJobOwnedPods = true
+	a.cfg.TrackJobs = true
 	pod := newTestPod("payments", "job-pod", "ghcr.io/acme/api:1.0")
 	pod.OwnerReferences = []metav1.OwnerReference{{Kind: "Job", Name: "batch-run"}}
 
@@ -455,6 +478,12 @@ func newTestApp(namespaces, registries []string, tagPrefix string) *app {
 		namespaceAllow: toSet(namespaces),
 		registryAllow:  normalizeRegistries(registries),
 	}
+}
+
+type assertErr string
+
+func (e assertErr) Error() string {
+	return string(e)
 }
 
 func newTestPod(namespace, name string, images ...string) v1.Pod {

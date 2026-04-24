@@ -25,7 +25,7 @@ Use cases:
 - de-duplicates same destination tag
 - skips destination when multiple different source refs would fight for same `<prefix>-<namespace>` tag in same repository
 - exposes `/healthz` and `/readyz` in watch mode for Kubernetes probes
-- returns non-zero / reconcile error when registry syncs fail
+- logs and skips source images missing from registry (`MANIFEST_UNKNOWN`); other registry sync failures still return non-zero / reconcile error
 - uses [`go-containerregistry/pkg/crane`](https://github.com/google/go-containerregistry/tree/main/pkg/crane) for registry operations
 - uses Docker/keychain auth supported by `go-containerregistry`
 - container image bundles `docker-credential-ecr-login` for ECR auth
@@ -142,4 +142,4 @@ If same repository in same namespace appears with multiple different image refs 
 
 Default mode is event-driven watch. Tracker syncs after controller-runtime cache warmup, then on relevant pod add/update/delete events, including phase and deletion-state changes.
 
-`/readyz` stays failing until initial cache sync and first registry sync complete. `/healthz` uses controller-runtime ping check.
+`/readyz` stays failing until initial cache sync and first registry sync complete. Missing source images in registry are logged and skipped, so they do not block readiness. `/healthz` uses controller-runtime ping check.

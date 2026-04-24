@@ -552,6 +552,17 @@ func (a *app) syncAssignment(ctx context.Context, item assignment, stats *syncSt
 
 	sourceDigest, err := crane.Digest(item.Source, craneOpts...)
 	if err != nil {
+		if isMissingManifestError(err) {
+			a.logger.Warn("source image missing in registry; skipped",
+				"namespace", item.Namespace,
+				"repository", item.Repository,
+				"source", item.Source,
+				"destination", item.Destination,
+				"error", err,
+			)
+			atomic.AddInt64(&stats.Skipped, 1)
+			return nil
+		}
 		return fmt.Errorf("resolve source digest: %w", err)
 	}
 
@@ -563,6 +574,17 @@ func (a *app) syncAssignment(ctx context.Context, item assignment, stats *syncSt
 	}
 
 	if err := crane.Copy(item.Source, item.Destination, craneOpts...); err != nil {
+		if isMissingManifestError(err) {
+			a.logger.Warn("source image missing during copy; skipped",
+				"namespace", item.Namespace,
+				"repository", item.Repository,
+				"source", item.Source,
+				"destination", item.Destination,
+				"error", err,
+			)
+			atomic.AddInt64(&stats.Skipped, 1)
+			return nil
+		}
 		return fmt.Errorf("copy image: %w", err)
 	}
 
@@ -574,6 +596,17 @@ func (a *app) syncAssignment(ctx context.Context, item assignment, stats *syncSt
 	)
 	atomic.AddInt64(&stats.Updated, 1)
 	return nil
+}
+
+func isMissingManifestError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "manifest_unknown") ||
+		strings.Contains(message, "manifest unknown") ||
+		strings.Contains(message, "requested image not found")
 }
 
 func (a *app) namespaceAllowed(namespace string) bool {
