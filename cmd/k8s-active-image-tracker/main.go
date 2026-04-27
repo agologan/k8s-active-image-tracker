@@ -587,11 +587,12 @@ func (a *app) syncAssignment(ctx context.Context, item assignment, stats *syncSt
 		return nil
 	}
 
+	destinationTag := fmt.Sprintf("%s-%s", a.cfg.TagPrefix, item.Namespace)
 	if err := a.withAuthRetry(ctx, item.Registry, func() error {
-		return crane.Copy(item.Source, item.Destination, craneOpts...)
+		return crane.Tag(item.Source, destinationTag, craneOpts...)
 	}); err != nil {
 		if isMissingManifestError(err) {
-			a.logger.Warn("source image missing during copy; skipped",
+			a.logger.Warn("source image missing during tag update; skipped",
 				"namespace", item.Namespace,
 				"repository", item.Repository,
 				"source", item.Source,
@@ -601,7 +602,7 @@ func (a *app) syncAssignment(ctx context.Context, item assignment, stats *syncSt
 			atomic.AddInt64(&stats.Skipped, 1)
 			return nil
 		}
-		return fmt.Errorf("copy image: %w", err)
+		return fmt.Errorf("tag image: %w", err)
 	}
 
 	a.logger.Info("tag updated",

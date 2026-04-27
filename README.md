@@ -97,11 +97,8 @@ Read existing source/destination image state:
 - `ecr:GetDownloadUrlForLayer`
 - `ecr:BatchCheckLayerAvailability`
 
-Write copied image/tag state:
+Write tracking tag state:
 - `ecr:PutImage`
-- `ecr:InitiateLayerUpload`
-- `ecr:UploadLayerPart`
-- `ecr:CompleteLayerUpload`
 
 Chart includes only resources needed to run in cluster:
 - `Deployment`
