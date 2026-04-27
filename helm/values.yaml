@@ -32,9 +32,11 @@ tracker:
   registry: ""
   tagPrefix: active
   workers: 4
-  trackJobs: false
-  verbose: false
-  dryRun: false
+  # ownerKinds:
+  #   - ReplicaSet
+  #   - StatefulSet
+  # verbose: false
+  # dryRun: false
   extraArgs: []
 
 healthProbe:

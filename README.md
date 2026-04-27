@@ -20,7 +20,7 @@ Use cases:
 - watches Kubernetes pods with controller-runtime manager/controller
 - reads images from init, regular, ephemeral containers
 - tracks only active pods: not deleting, not in `Succeeded`, not in `Failed`
-- skips pods with direct owner kind `Job` by default; `--track-jobs` opts in
+- tracks pods with direct owner kind `ReplicaSet` or `StatefulSet` by default; `--owner-kinds` overrides
 - filters by namespace allow list and registry allow list
 - de-duplicates same destination tag
 - skips destination when multiple different source refs would fight for same `<prefix>-<namespace>` tag in same repository
@@ -120,7 +120,7 @@ Health probes:
 - `--tag-prefix`: destination tag prefix. Final tag = `<prefix>-<namespace>`. Default `active`.
 - `--workers`: concurrent registry sync workers. Default `4`
 - `--health-probe-bind-address`: health probe bind address for `/healthz` and `/readyz`. Default `:8081`. Set `0` to disable.
-- `--track-jobs`: track pods with direct ownerReference kind `Job`. Default skips them.
+- `--owner-kinds`: comma-separated direct pod ownerReference kinds to include. Default `ReplicaSet,StatefulSet`. Empty includes all active pods.
 - `--dry-run`: log only, no registry writes
 - `--once`: single sync then exit
 - `--verbose`: debug logs
@@ -131,7 +131,7 @@ Registry filter matches normalized registry host names from image refs. Example:
 
 Name means source image chosen from active, non-terminal pods tracker can currently observe. Tracker is not pod health monitor.
 
-Job-owned pod handling checks direct pod ownerReferences only. Deployment/ReplicaSet pods still count. CronJob pods skip by default because direct owner is `Job`. Use `--track-jobs` to include them.
+Owner-kind matching checks direct pod ownerReferences only. Default allows `ReplicaSet` and `StatefulSet`, so Deployment-managed pods still count because direct owner is `ReplicaSet`. Job, CronJob-created, DaemonSet, and ownerless pods skip by default. Use `--owner-kinds=Job,DaemonSet,ReplicaSet,StatefulSet` or empty `--owner-kinds=` to widen match.
 
 Tracker does not delete or roll back destination tags when pods disappear, become unobservable, or fall outside filters. Existing tag remains until newer observed active state overwrites same destination.
 

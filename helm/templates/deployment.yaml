@@ -69,9 +69,7 @@ spec:
             - --tag-prefix={{ .Values.tracker.tagPrefix }}
             - --workers={{ .Values.tracker.workers }}
             - --health-probe-bind-address={{ ternary (printf ":%v" .Values.healthProbe.port) "0" .Values.healthProbe.enabled }}
-            {{- if .Values.tracker.trackJobs }}
-            - --track-jobs
-            {{- end }}
+            - --owner-kinds={{ join "," .Values.tracker.ownerKinds }}
             {{- if .Values.tracker.verbose }}
             - --verbose
             {{- end }}

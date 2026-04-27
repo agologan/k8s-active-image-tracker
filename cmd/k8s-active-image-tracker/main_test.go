@@ -103,13 +103,33 @@ func TestParseConfigArgs_UsesDedicatedFlagSet(t *testing.T) {
 	}
 }
 
-func TestParseConfigArgs_TrackJobs(t *testing.T) {
-	cfg, err := parseConfigArgs([]string{"--track-jobs"})
+func TestParseConfigArgs_OwnerKinds_Default(t *testing.T) {
+	cfg, err := parseConfigArgs(nil)
 	if err != nil {
 		t.Fatalf("parseConfigArgs() error = %v", err)
 	}
-	if !cfg.TrackJobs {
-		t.Fatal("cfg.TrackJobs = false, want true")
+	if !slices.Equal(cfg.OwnerKinds, []string{"ReplicaSet", "StatefulSet"}) {
+		t.Fatalf("cfg.OwnerKinds = %v, want [ReplicaSet StatefulSet]", cfg.OwnerKinds)
+	}
+}
+
+func TestParseConfigArgs_OwnerKinds_Override(t *testing.T) {
+	cfg, err := parseConfigArgs([]string{"--owner-kinds", "Job,DaemonSet,Job"})
+	if err != nil {
+		t.Fatalf("parseConfigArgs() error = %v", err)
+	}
+	if !slices.Equal(cfg.OwnerKinds, []string{"Job", "DaemonSet"}) {
+		t.Fatalf("cfg.OwnerKinds = %v, want [Job DaemonSet]", cfg.OwnerKinds)
+	}
+}
+
+func TestParseConfigArgs_OwnerKinds_EmptyMeansAll(t *testing.T) {
+	cfg, err := parseConfigArgs([]string{"--owner-kinds", ""})
+	if err != nil {
+		t.Fatalf("parseConfigArgs() error = %v", err)
+	}
+	if cfg.OwnerKinds != nil {
+		t.Fatalf("cfg.OwnerKinds = %v, want nil", cfg.OwnerKinds)
 	}
 }
 
@@ -385,7 +405,7 @@ func TestBuildAssignments_SkipsDeletingPods(t *testing.T) {
 	}
 }
 
-func TestBuildAssignments_SkipsJobOwnedPodsByDefault(t *testing.T) {
+func TestBuildAssignments_SkipsUntrackedControllerByDefault(t *testing.T) {
 	a := newTestApp(nil, nil, "live")
 	pod := newTestPod("payments", "job-pod", "ghcr.io/acme/api:1.0")
 	pod.OwnerReferences = []metav1.OwnerReference{{Kind: "Job", Name: "batch-run"}}
@@ -400,9 +420,25 @@ func TestBuildAssignments_SkipsJobOwnedPodsByDefault(t *testing.T) {
 	}
 }
 
-func TestBuildAssignments_KeepsJobOwnedPodsWhenTrackingEnabled(t *testing.T) {
+func TestBuildAssignments_SkipsOwnerlessPodsByDefault(t *testing.T) {
 	a := newTestApp(nil, nil, "live")
-	a.cfg.TrackJobs = true
+	pod := newTestPod("payments", "standalone", "ghcr.io/acme/api:1.0")
+	pod.OwnerReferences = nil
+
+	assignments, conflicts := a.buildAssignments([]v1.Pod{pod})
+
+	if len(conflicts) != 0 {
+		t.Fatalf("buildAssignments() conflicts = %v, want none", conflicts)
+	}
+	if len(assignments) != 0 {
+		t.Fatalf("buildAssignments() assignments = %v, want none", assignments)
+	}
+}
+
+func TestBuildAssignments_KeepsConfiguredControllerKinds(t *testing.T) {
+	a := newTestApp(nil, nil, "live")
+	a.cfg.OwnerKinds = []string{"Job"}
+	a.ownerKindAllow = toSet(a.cfg.OwnerKinds)
 	pod := newTestPod("payments", "job-pod", "ghcr.io/acme/api:1.0")
 	pod.OwnerReferences = []metav1.OwnerReference{{Kind: "Job", Name: "batch-run"}}
 
@@ -470,7 +506,7 @@ func TestPodTrackingState_JobOwnerChangeDetected(t *testing.T) {
 	right.OwnerReferences = []metav1.OwnerReference{{Kind: "Job", Name: "batch-run"}}
 
 	if podTrackingState(&left) == podTrackingState(&right) {
-		t.Fatal("podTrackingState() should differ when job ownership differs")
+		t.Fatal("podTrackingState() should differ when owner kinds differ")
 	}
 }
 
@@ -638,14 +674,17 @@ func TestAppWithAuthRetry_InvalidatesAndRetries(t *testing.T) {
 }
 
 func newTestApp(namespaces, registries []string, tagPrefix string) *app {
+	ownerKinds := []string{"ReplicaSet", "StatefulSet"}
 	return &app{
 		cfg: config{
-			TagPrefix: tagPrefix,
-			Workers:   1,
+			TagPrefix:  tagPrefix,
+			Workers:    1,
+			OwnerKinds: ownerKinds,
 		},
 		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		namespaceAllow: toSet(namespaces),
 		registryAllow:  normalizeRegistries(registries),
+		ownerKindAllow: toSet(ownerKinds),
 	}
 }
 
@@ -678,7 +717,14 @@ func newTestPod(namespace, name string, images ...string) v1.Pod {
 	}
 
 	return v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       v1.PodSpec{Containers: containers},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "ReplicaSet",
+				Name: name + "-rs",
+			}},
+		},
+		Spec: v1.PodSpec{Containers: containers},
 	}
 }

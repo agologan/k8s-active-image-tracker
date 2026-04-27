@@ -42,7 +42,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
-const clusterSyncRequest = "cluster"
+const (
+	clusterSyncRequest   = "cluster"
+	defaultOwnerKindsCSV = "ReplicaSet,StatefulSet"
+)
 
 type config struct {
 	Kubeconfig             string
@@ -51,7 +54,7 @@ type config struct {
 	TagPrefix              string
 	Workers                int
 	HealthProbeBindAddress string
-	TrackJobs              bool
+	OwnerKinds             []string
 	DryRun                 bool
 	Once                   bool
 	Verbose                bool
@@ -80,6 +83,7 @@ type app struct {
 	client         ctrlclient.Client
 	namespaceAllow map[string]struct{}
 	registryAllow  map[string]struct{}
+	ownerKindAllow map[string]struct{}
 	authKeychain   *registryCachingKeychain
 	craneOptions   []crane.Option
 	ready          atomic.Bool
@@ -126,6 +130,7 @@ func main() {
 		client:         apiClient,
 		namespaceAllow: toSet(cfg.Namespaces),
 		registryAllow:  normalizeRegistries(cfg.Registries),
+		ownerKindAllow: toSet(cfg.OwnerKinds),
 		authKeychain:   authKeychain,
 		craneOptions: []crane.Option{
 			crane.WithAuthFromKeychain(authKeychain),
@@ -147,6 +152,7 @@ func parseConfigArgs(args []string) (config, error) {
 	var namespaces string
 	var registries string
 	var registry string
+	var ownerKinds string
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	fs.StringVar(&cfg.Kubeconfig, "kubeconfig", "", "Path to kubeconfig. Empty tries in-cluster config first, then ~/.kube/config.")
@@ -156,7 +162,7 @@ func parseConfigArgs(args []string) (config, error) {
 	fs.StringVar(&cfg.TagPrefix, "tag-prefix", "active", "Destination tag prefix. Final tag becomes <prefix>-<namespace>.")
 	fs.IntVar(&cfg.Workers, "workers", 4, "Concurrent registry tag workers.")
 	fs.StringVar(&cfg.HealthProbeBindAddress, "health-probe-bind-address", ":8081", "Health probe bind address. Set 0 to disable.")
-	fs.BoolVar(&cfg.TrackJobs, "track-jobs", false, "Track pods with direct ownerReference kind Job. Default skips them.")
+	fs.StringVar(&ownerKinds, "owner-kinds", defaultOwnerKindsCSV, "Comma-separated direct pod ownerReference kinds to include. Empty includes all active pods.")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "Log planned tag updates without writing to registry.")
 	fs.BoolVar(&cfg.Once, "once", false, "Run single sync then exit.")
 	fs.BoolVar(&cfg.Verbose, "verbose", false, "Enable debug logs.")
@@ -166,6 +172,7 @@ func parseConfigArgs(args []string) (config, error) {
 
 	cfg.Namespaces = splitCSV(namespaces)
 	cfg.Registries = append(splitCSV(registries), splitCSV(registry)...)
+	cfg.OwnerKinds = normalizeOwnerKinds(splitCSV(ownerKinds))
 	cfg.TagPrefix = strings.TrimSpace(cfg.TagPrefix)
 
 	if cfg.TagPrefix == "" {
@@ -238,7 +245,7 @@ func (a *app) run(ctx context.Context, restCfg *rest.Config, scheme *runtime.Sch
 		"tagPrefix", a.cfg.TagPrefix,
 		"workers", a.cfg.Workers,
 		"healthProbeBindAddress", a.cfg.HealthProbeBindAddress,
-		"trackJobs", a.cfg.TrackJobs,
+		"ownerKinds", displayOrAll(a.cfg.OwnerKinds),
 		"dryRun", a.cfg.DryRun,
 	)
 
@@ -416,7 +423,7 @@ func (a *app) buildAssignments(pods []v1.Pod) ([]assignment, []string) {
 	conflicts := make(map[string]map[string]struct{})
 
 	for _, pod := range pods {
-		if !a.namespaceAllowed(pod.Namespace) || !podActiveForTracking(&pod, a.cfg.TrackJobs) {
+		if !a.namespaceAllowed(pod.Namespace) || !podActiveForTracking(&pod, a.ownerKindAllow) {
 			continue
 		}
 
@@ -715,16 +722,16 @@ func podTrackingState(pod *v1.Pod) string {
 		pod.Namespace,
 		string(pod.Status.Phase),
 		strconv.FormatBool(pod.DeletionTimestamp != nil),
-		strconv.FormatBool(podOwnedByJob(pod)),
+		strings.Join(podOwnerKinds(pod), ","),
 		strings.Join(images, ","),
 	}, "|")
 }
 
-func podActiveForTracking(pod *v1.Pod, trackJobs bool) bool {
+func podActiveForTracking(pod *v1.Pod, ownerKindAllow map[string]struct{}) bool {
 	if pod == nil || pod.DeletionTimestamp != nil {
 		return false
 	}
-	if !trackJobs && podOwnedByJob(pod) {
+	if !podMatchesOwnerKind(pod, ownerKindAllow) {
 		return false
 	}
 
@@ -736,17 +743,42 @@ func podActiveForTracking(pod *v1.Pod, trackJobs bool) bool {
 	}
 }
 
-func podOwnedByJob(pod *v1.Pod) bool {
+func podMatchesOwnerKind(pod *v1.Pod, ownerKindAllow map[string]struct{}) bool {
 	if pod == nil {
 		return false
 	}
+	if len(ownerKindAllow) == 0 {
+		return true
+	}
 
-	for _, owner := range pod.OwnerReferences {
-		if owner.Kind == "Job" {
+	for _, kind := range podOwnerKinds(pod) {
+		if _, ok := ownerKindAllow[kind]; ok {
 			return true
 		}
 	}
 	return false
+}
+
+func podOwnerKinds(pod *v1.Pod) []string {
+	if pod == nil || len(pod.OwnerReferences) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(pod.OwnerReferences))
+	kinds := make([]string, 0, len(pod.OwnerReferences))
+	for _, owner := range pod.OwnerReferences {
+		kind := strings.TrimSpace(owner.Kind)
+		if kind == "" {
+			continue
+		}
+		if _, ok := seen[kind]; ok {
+			continue
+		}
+		seen[kind] = struct{}{}
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	return kinds
 }
 
 func collectErrors(errCh <-chan error) []error {
@@ -770,6 +802,27 @@ func splitCSV(value string) []string {
 			continue
 		}
 		out = append(out, part)
+	}
+	return out
+}
+
+func normalizeOwnerKinds(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
 	return out
 }
