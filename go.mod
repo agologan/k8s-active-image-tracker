@@ -1,8 +1,9 @@
 module github.com/agologan/k8s-active-image-tracker
 
-go 1.26.1
+go 1.26.3
 
 require (
+	github.com/go-logr/logr v1.4.3
 	github.com/google/go-containerregistry v0.21.5
 	k8s.io/api v0.35.4
 	k8s.io/apimachinery v0.35.4
@@ -21,7 +22,6 @@ require (
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
-	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
 	github.com/go-openapi/swag v0.23.0 // indirect
